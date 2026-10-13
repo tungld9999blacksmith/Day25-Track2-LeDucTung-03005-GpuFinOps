@@ -45,3 +45,29 @@ def tokens_per_watt(total_tokens: int, wh: float, seconds: float = 1.0) -> float
     """Energy efficiency of serving: tokens per watt (higher is better)."""
     watts = (wh * 3600.0) / seconds if seconds > 0 else 0.0
     return total_tokens / watts if watts > 0 else 0.0
+
+
+# ---------------------------------------------------------------------------
+# Extension 5 — carbon-aware scheduling
+# ---------------------------------------------------------------------------
+def job_energy_kwh(watts: float, num_gpus: int, hours_per_day: float, days: float, pue: float = 1.0) -> float:
+    """IT energy of a job: GPU TDP x GPUs x hours (x PUE for facility overhead)."""
+    return watts / 1000.0 * num_gpus * hours_per_day * days * pue
+
+
+def region_comparison(kwh: float, carbon_price_per_tonne: float = 100.0) -> list[dict]:
+    """Electricity $, carbon, and carbon-adjusted $ for `kwh` in every known region."""
+    rows = []
+    for region in REGION_CARBON:
+        wh = kwh * 1000.0
+        co2_g = carbon_g(wh, region)
+        usd = energy_cost_usd(wh, region)
+        rows.append({
+            "region": region,
+            "usd_per_kwh": REGION_PRICE_KWH[region],
+            "g_per_kwh": REGION_CARBON[region],
+            "energy_usd": usd,
+            "co2_kg": co2_g / 1000.0,
+            "carbon_adjusted_usd": usd + co2_g / 1e6 * carbon_price_per_tonne,
+        })
+    return rows

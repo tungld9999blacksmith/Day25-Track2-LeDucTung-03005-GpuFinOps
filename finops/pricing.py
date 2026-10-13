@@ -102,3 +102,77 @@ def spot_checkpoint_cost(
         "on_demand_cost": round(on_demand_cost, 2),
         "savings_pct": round(savings_pct, 1),
     }
+
+
+# ---------------------------------------------------------------------------
+# Extension 1 — interruption-aware, term-aware tier policy
+# ---------------------------------------------------------------------------
+# Illustrative per-hour spot reclaim probability by GPU type (scarcer / smaller
+# SKUs get reclaimed more often). Assumption — re-baseline against real data.
+SPOT_INTERRUPT_RATE = {
+    "B200": 0.03, "H100": 0.04, "H200": 0.05, "MI300X": 0.06,
+    "A100": 0.06, "L4": 0.10, "A10G": 0.12,
+}
+DEFAULT_INTERRUPT_RATE = 0.05
+
+
+def recommend_tier_v2(
+    hours_per_day: float,
+    interruptible: bool,
+    gpu_type: str,
+    prices: dict,
+    job_days: float = 30,
+    horizon_months: int = 36,
+) -> dict:
+    """Pick the cheapest tier per *used* GPU-hour, with real commitment costs.
+
+    Improvements over recommend_tier():
+      1. spot is costed with a per-GPU-type interruption rate (rework + checkpoints),
+         not assumed to always win;
+      2. reserved is billed for ALL 24h of the day (a commitment is not pay-per-use),
+         so its cost per used hour is rate * 24 / hours_per_day;
+      3. 1yr vs 3yr: a term is only eligible if the capacity is needed for at least
+         that long (``horizon_months``); bursty jobs (< 30 days) get no reservation.
+
+    `prices` needs on_demand_hr, spot_hr, reserved_1yr_hr, reserved_3yr_hr.
+    Returns {"tier", "term", "cost_per_used_hr", "candidates"}; tier is one of
+    'spot' | 'reserved' | 'on_demand' (term is '1yr'/'3yr' when reserved).
+    """
+    hpd = max(1e-9, float(hours_per_day))
+    od = float(prices["on_demand_hr"])
+    cands = {("on_demand", None): od}
+    if interruptible:
+        sim = spot_checkpoint_cost(
+            100.0, float(prices["spot_hr"]), od,
+            interrupt_rate=SPOT_INTERRUPT_RATE.get(gpu_type, DEFAULT_INTERRUPT_RATE))
+        cands[("spot", None)] = sim["spot_cost"] / 100.0
+    if job_days >= 30:  # steady service, otherwise no point committing
+        for term, months, key in (("1yr", 12, "reserved_1yr_hr"), ("3yr", 36, "reserved_3yr_hr")):
+            if horizon_months >= months and key in prices:
+                cands[("reserved", term)] = float(prices[key]) * 24.0 / hpd
+    (tier, term), cost = min(cands.items(), key=lambda kv: kv[1])
+    return {"tier": tier, "term": term, "cost_per_used_hr": round(cost, 4),
+            "candidates": {f"{t}{'-' + m if m else ''}": round(c, 4) for (t, m), c in cands.items()}}
+
+
+# ---------------------------------------------------------------------------
+# Extension 3 — is prompt caching actually worth it?
+# ---------------------------------------------------------------------------
+def cache_breakeven_reads(write_cost: float = 0.25, read_discount: float = 0.10) -> float:
+    """Reads per cached prefix needed before caching beats not caching.
+
+    `write_cost` is the EXTRA cost of creating the cache, as a multiple of the normal
+    input price (Anthropic writes bill 1.25x -> 0.25; storage-billed caches add
+    storage $ on top). Over 1 write + n reads:
+        no cache : (n + 1) * P
+        cache    : (1 + write_cost) * P + n * read_discount * P
+    -> worth it when n > write_cost / (1 - read_discount).
+    """
+    if read_discount >= 1.0:
+        return float("inf")
+    return max(0.0, write_cost) / (1.0 - read_discount)
+
+
+def cache_is_worth_it(avg_reads: float, write_cost: float = 0.25, read_discount: float = 0.10) -> bool:
+    """True when the average reads per cached prefix exceed the break-even."""
+    return avg_reads > cache_breakeven_reads(write_cost, read_discount)
