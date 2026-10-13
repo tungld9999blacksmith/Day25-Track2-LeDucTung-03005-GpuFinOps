@@ -1,0 +1,9 @@
+[project]
+name = "day25-track2-leductung-03005-gpufinops"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "matplotlib>=3.7",
+    "pandas>=2.0",
+    "pytest>=7.4",
+]
